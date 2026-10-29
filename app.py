@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
+import yfinance as yf
 from datetime import date
 from io import BytesIO
 
@@ -162,9 +163,21 @@ with st.sidebar:
     st.caption("Historical testing only. No broker connection or order execution.")
 
 if page=="Backtesting Lab":
-    st.subheader("Strategy backtesting")
-    st.write("Upload OHLC candle CSV for your market/timeframe. Required columns: `Open, High, Low, Close`; a timestamp column named `Date`, `Datetime` or `Timestamp` is strongly recommended.")
-    upload=st.file_uploader("Upload historical candle CSV",type=["csv"])
+    st.subheader("Automatic strategy backtesting")
+    st.write("Choose a market and date range. Nexora will fetch candles automatically; you do not need to upload a CSV.")
+    instruments = {
+        "Gold spot (XAUUSD, Yahoo data)": "XAUUSD=X",
+        "Gold futures (GC=F, proxy)": "GC=F",
+        "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "JPY=X",
+        "USD/CAD": "CAD=X", "AUD/USD": "AUDUSD=X",
+        "Bitcoin (BTC/USD)": "BTC-USD", "Ethereum (ETH/USD)": "ETH-USD",
+        "Silver spot (XAGUSD, Yahoo data)": "XAGUSD=X"
+    }
+    left,right=st.columns(2)
+    market_label=left.selectbox("Market",list(instruments.keys()),index=0)
+    interval=right.selectbox("Candle timeframe",["5m","15m","30m","60m","1d"],index=0)
+    period_options={"5m":["5d","1mo","3mo"],"15m":["5d","1mo","3mo","6mo"],"30m":["1mo","3mo","6mo","1y"],"60m":["1mo","3mo","6mo","1y","2y"],"1d":["1mo","3mo","6mo","1y","2y","5y","10y"]}
+    period=st.selectbox("Historical period",period_options[interval],index=min(2,len(period_options[interval])-1))
     with st.expander("Backtest rules",expanded=True):
         a,b,c=st.columns(3)
         fast=a.number_input("Fast EMA",min_value=1,max_value=100,value=8)
@@ -177,22 +190,35 @@ if page=="Backtesting Lab":
         a,b=st.columns(2)
         fee=a.number_input("Fees per unit (price units)",min_value=0.0,value=0.0,help="Simple approximation, not a broker commission model.")
         slip=b.number_input("Slippage per unit (price units)",min_value=0.0,value=0.0)
-    if upload:
+    st.caption("Free Yahoo Finance data has limits: intraday history is short (especially 5-minute candles), symbols may be unavailable, and quotes may differ from your broker. This is backtesting only, not live trading.")
+    if st.button("Fetch data & run backtest",type="primary",use_container_width=True):
         try:
-            raw=pd.read_csv(upload)
-            st.success(f"Loaded {len(raw):,} raw rows.")
-            st.dataframe(raw.head(5),use_container_width=True,hide_index=True)
-            if st.button("Run backtest",type="primary",use_container_width=True):
+            ticker=instruments[market_label]
+            with st.spinner(f"Fetching {ticker} candles..."):
+                raw=yf.download(ticker,period=period,interval=interval,auto_adjust=False,progress=False,threads=False)
+            if raw is None or raw.empty:
+                st.error("The free data source returned no candles for this symbol/timeframe/period. Try a shorter period or another symbol.")
+            else:
+                if isinstance(raw.columns,pd.MultiIndex):
+                    raw.columns=raw.columns.get_level_values(0)
+                raw=raw.reset_index()
+                raw.columns=[str(c).strip() for c in raw.columns]
+                dtcol=next((c for c in raw.columns if c.lower() in ["datetime","date"]),raw.columns[0])
+                raw=raw.rename(columns={dtcol:"Date"})
+                st.success(f"Fetched {len(raw):,} candles for {market_label} ({interval}, {period}).")
+                st.dataframe(raw.head(5),use_container_width=True,hide_index=True)
                 use_fee=fee if costs else 0.0
                 use_slip=slip if costs else 0.0
                 candles,result=run_ema_backtest(raw,session,rr,one_day,use_fee,use_slip,int(fast),int(slow))
                 st.session_state.bt_result=result
                 st.session_state.bt_candles=candles
+                st.session_state.bt_source=f"{market_label} · {interval} · {period} · Yahoo Finance"
         except Exception as e:
-            st.error(f"CSV issue: {e}")
+            st.error(f"Could not fetch/backtest data: {e}. Try another symbol or shorter period.")
     if st.session_state.bt_result is not None:
         result=st.session_state.bt_result
         st.markdown("### Results")
+        st.caption(st.session_state.get("bt_source", "Previously generated backtest"))
         closed,m=metrics(result)
         c=st.columns(5)
         c[0].metric("Closed trades",m["trades"])
@@ -320,9 +346,9 @@ elif page=="Help & Limits":
     st.subheader("How to use the app")
     st.markdown("""
     **Backtesting**
-    1. Download/export candle history as CSV from a data provider.
-    2. CSV must include `Open, High, Low, Close` and preferably `Date` or `Timestamp`.
-    3. Upload it in Backtesting Lab, choose settings and tap Run backtest.
+    1. Choose a market, timeframe and historical period in Backtesting Lab.
+    2. Tap **Fetch data & run backtest**; candles are fetched from Yahoo Finance automatically.
+    3. Free data may be limited, delayed, unavailable for some symbols, or different from your broker feed.
     4. Download results or copy trades into the journal.
 
     **Journal**
